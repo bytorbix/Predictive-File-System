@@ -15,25 +15,30 @@ struct Disk {
     size_t  blocks;     // Maximum Capacity of blocks in the disk
     size_t  reads;      // Amount of reading operations (Used for benchmarking)
     size_t  writes;     // Amount of writing operations (Used for benchmarking)
-    bool    mounted;    // If disk is mounted or not
+    bool    mounted;    // Boolean representing if the disk is mounted or not
 };
 
 
+
+/* Opens the file and returns the pointer to the virtual disk*/
 Disk * disk_open(const char *path, size_t blocks) {
 
-
+    // Attempt to open the file and receive the proccess id (fd)
+    // if the file does not exist, a new one will be created.
     int fd = open(path, O_RDWR | O_CREAT, 0666);
     if (fd < 0) {
         perror("disk_open: failed to open/create disk image");
         return NULL;
     }
 
+    // free up space and initiate the disk object and the pointer
     Disk *disk = (Disk *)calloc(1, sizeof(Disk));
     if (disk == NULL) {
         close(fd); 
         return NULL;
     }
 
+    // calc size and resize if needed
     off_t total_size = (off_t)blocks * BLOCK_SIZE;
     if (ftruncate(fd, total_size) < 0) {
         perror("disk_open: failed to resize disk image");
@@ -42,6 +47,7 @@ Disk * disk_open(const char *path, size_t blocks) {
         return NULL;
     }
 
+    // final construction 
     disk->fd      = fd;
     disk->blocks  = blocks;
     disk->mounted = true;
@@ -49,7 +55,9 @@ Disk * disk_open(const char *path, size_t blocks) {
     return disk;
 }
 
+// closes the disk and frees up the memory
 void disk_close(Disk *disk) {
+    // error checks
     if (disk == NULL) {
         return;
     }
@@ -58,11 +66,13 @@ void disk_close(Disk *disk) {
             perror("disk_close: Error closing the disk");
         }
     }
+    // unmount the disk and free it from the memory
     disk->mounted = false;
     disk->fd = -1; 
     free(disk);
 }
 
+// write one block of data (4096 bytes) into the disk
 ssize_t disk_write(Disk *disk, size_t block, char *data) {
     if (disk == NULL) {
         perror("disk_write: disk is invalid");
@@ -77,12 +87,14 @@ ssize_t disk_write(Disk *disk, size_t block, char *data) {
         return -1;
     }
 
+    // position the offset in the file at desired block location
     off_t offset = (off_t)block * BLOCK_SIZE;
     if (lseek(disk->fd, offset, SEEK_SET) < 0) {
         perror("disk_write: lseek has failed");
         return -1;
     }
 
+    // attempt to write the data into the disk
     ssize_t written_bytes = write(disk->fd, data, BLOCK_SIZE);
     if (written_bytes != BLOCK_SIZE) {
         if (written_bytes < 0) {
@@ -92,6 +104,8 @@ ssize_t disk_write(Disk *disk, size_t block, char *data) {
         }
         return -1;
     }
+    // success
+    // write operation count is incremented
     disk->writes++;
     return written_bytes;
 }
@@ -117,7 +131,7 @@ ssize_t disk_read(Disk *disk, size_t block, char *data) {
         return -1;
     }
 
-
+    // attempt to read the data from the disk into the buffer data
     ssize_t bytes_read = read(disk->fd, data, BLOCK_SIZE);
     if (bytes_read != BLOCK_SIZE) {
         if (bytes_read < 0) {
@@ -131,6 +145,7 @@ ssize_t disk_read(Disk *disk, size_t block, char *data) {
         return -1; 
     }
 
+    // increment the read operations and return the buffer
     disk->reads++;
     return bytes_read; 
 }
