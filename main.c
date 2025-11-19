@@ -26,5 +26,15 @@ int main() {
     fs_mount(&fs, disk);
     fs_debug(disk);
     
-    
+    ssize_t inode = fs_create(&fs);
+    printf("Found Inode available at: %zd\n", inode);
+    ssize_t inode1 = fs_create(&fs);
+    printf("Found Inode available at: %zd\n", inode1);
+    ssize_t inode2 = fs_create(&fs);
+    printf("Found Inode available at: %zd\n", inode2);
+    ssize_t inode3 = fs_create(&fs);
+    printf("Found Inode available at: %zd\n", inode3);
+    ssize_t inode4 = fs_create(&fs);
+    printf("Found Inode available at: %zd\n", inode4);
+
 }

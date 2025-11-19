@@ -2,3 +2,5 @@
 mfs_test
 mfs_test_disk.img
 main
+mfs_test_disk.img
+.gitignore

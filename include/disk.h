@@ -31,4 +31,4 @@ ssize_t disk_write(Disk *disk, size_t block, char *data);
 
 ssize_t disk_read(Disk *disk, size_t block, char *data);
 
-#endif 
+#endif  

@@ -327,47 +327,44 @@ ssize_t fs_create(FileSystem *fs) {
     }
 
     Block block_buffer;
-    uint32_t total_inode_blocks = fs->meta_data->inode_blocks;
 
-    for (uint32_t i = 1; i <= total_inode_blocks; i++)
+    for (uint32_t i = 1; i <= fs->meta_data->inode_blocks; i++)
     {
         // Attempt to copy inode table into the block
         if (disk_read(fs->disk, i, block_buffer.data) < 0) {
             perror("fs_create: Failed to read Inode Block from disk");
             return -1;
         }
-        // find a free inode block
-        Inode inode_block = block_buffer.inodes[i];
-        if (inode_block.valid==0) {
-            for (uint32_t j = 0; j < INODES_PER_BLOCK; j++)
-            {
-                Inode *current_node = &block_buffer.inodes[j];
-                if(current_node->valid==0) {
-                    current_node->valid = 1;
-                    current_node->size = 0;
 
-                    for (int k = 0; k < POINTERS_PER_NODE; k++)
-                    {
-                        current_node->direct[k] = 0;
-                    }
+        // Iterate through the inodes in the inode table
+        for (uint32_t j = 0; j < INODES_PER_BLOCK; j++)
+        {
+            Inode *temp_inode = &block_buffer.inodes[j];
+            if (temp_inode->valid == 0) {
+                // Inode Found ! Formatting Inode and returing the location
+                temp_inode->valid = 1;
+                temp_inode->size = 0;
 
-                    current_node->indirect = 0 ;
-
-                    if (disk_write(fs->disk, i, block_buffer.data) < 0) {
-                        perror("fs_create: Failed to write updated Inode Block");
-                        current_node->valid = 1;
-                        return -1;
-                    }
-
-                    ssize_t inode_number = (ssize_t)((i-1) * INODES_PER_BLOCK + j); // ?
-
-                    return inode_number;
-                    
+                // Clear direct/Indirect blocks
+                for (uint32_t i = 0; i < 5; i++)
+                {
+                    temp_inode->direct[i] = 0;
                 }
+                temp_inode->indirect=0;
+
+                if (disk_write(fs->disk, i, block_buffer.data) < 0) {
+                    perror("fs_create: Failed to write updated Inode Block");
+                    // Undo allocation if write fails to maintain consistency
+                    temp_inode->valid = 0; 
+                    return -1;
+                }
+                
+
+                // Return The Inode location
+                ssize_t inode_number = (ssize_t)((i-1) * INODES_PER_BLOCK + j);
+                return inode_number;
             }
-            
-            
-        }
+        }    
     }
 
     //No free inode found after checking all blocks
@@ -375,9 +372,67 @@ ssize_t fs_create(FileSystem *fs) {
     return -1;
 }
 
+ssize_t fs_write(FileSystem *fs, size_t inode_number, char *data, size_t length, size_t offset) 
+{
+    // Validation check
+     if (fs == NULL || fs->disk == NULL) {
+        perror("fs_write: Error fs or disk is invalid (NULL)"); 
+        return -1;
+    }
+    if (!fs->disk->mounted) { 
+        fprintf(stderr, "fs_write: Error disk is not mounted, cannot procceed t\n");
+        return -1;
+    }
+    if (inode_number >= fs->meta_data->inodes) {
+        // Inode number is invalid (too high)
+        fprintf(stderr, "fs_write: Error inode_number is out of bounds, cannot procceed t\n");
+        return -1;
+    }
 
+    // Locate and Read the Target Inode Block
+    uint32_t block_index = (uint32_t)(inode_number / INODES_PER_BLOCK) + 1;
+    uint32_t inode_offset = (uint32_t)(inode_number % INODES_PER_BLOCK);
+
+    // Copy the block containing the inode table
+    Block block_buffer;
+    if (disk_read(fs->disk, block_index, block_buffer.data) < 0) {
+        perror("fs_write: Failed to read Inode Block");
+        return -1;
+    }
+
+    Inode *target_inode = &block_buffer.inodes[inode_offset];
+    if (target_inode->valid == 0) {
+        fprintf(stderr, "fs_write: Error, Inode %zu is unallocated\n", inode_number);
+        return -1;
+    }
+
+    // Pointer to track position in the input data buffer
+    char* current_data_ptr = data;
+    // Total bytes remaining to write
+    size_t bytes_remaining = length;
+    // Current byte position within the file
+    size_t current_file_offset = offset;
+    // Total bytes successfully written
+    ssize_t bytes_written = 0;
+
+    while (bytes_remaining > 0) {
+
+        uint32_t logical_block_number = offset / BLOCK_SIZE;
+        uint32_t block_offset = current_file_offset % BLOCK_SIZE;
+        uint32_t space_in_block = BLOCK_SIZE - block_offset;
+        uint32_t write_size = (bytes_remaining < space_in_block) ? bytes_remaining : space_in_block;
+
+        if (logical_block_number < 5) 
+        {
+
+
+        }
+        else if(logical_block_number >= 5) {
+
+        }
+    }
+}
 
 bool fs_remove(FileSystem *fs, size_t inode_number) {return false;}
 ssize_t fs_stat(FileSystem *fs, size_t inode_number) {return -1;}
 ssize_t fs_read(FileSystem *fs, size_t inode_number, char *data, size_t length, size_t offset) {return -1;}
-ssize_t fs_write(FileSystem *fs, size_t inode_number, char *data, size_t length, size_t offset) {return -1;}
