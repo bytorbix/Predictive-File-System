@@ -1,9 +1,10 @@
 {
-    "C_Cpp.errorSquiggles": "enabled",
+    "C_Cpp.errorSquiggles": "disabled",
     "files.associations": {
         "algorithm": "cpp",
         "format": "cpp",
-        "math.h": "c"
+        "math.h": "c",
+        "stdint.h": "c"
     },
     "C_Cpp.default.compilerPath": "/usr/bin/gcc"
 }

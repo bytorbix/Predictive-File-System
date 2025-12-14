@@ -1,5 +1,6 @@
 #include "fs.h"
 #include "disk.h"
+#include "utils.h"
 #include <stdio.h> 
 #include <string.h> 
 #include <stdlib.h> 
@@ -68,7 +69,7 @@ void fs_debug(Disk *disk) {
                 // Scan and print Direct Pointers
                 printf("\tdirect blocks:");
                 int count = 0;
-                for (uint32_t k = 0; k < POINTERS_PER_NODE; k++) {
+                for (uint32_t k = 0; k < POINTERS_PER_INODE; k++) {
                     uint32_t block_num = current_node.direct[k];
                     if (block_num != 0) {
                         printf(" %u", block_num);
@@ -127,9 +128,11 @@ bool fs_format(Disk *disk)
     double percent_blocks = (double)superblock.blocks * 0.10;   
     superblock.inode_blocks = (uint32_t)ceil(percent_blocks);
     superblock.inodes = superblock.inode_blocks * INODES_PER_BLOCK;
+
+
     
     // Capacity check
-    if (1 + superblock.inode_blocks > superblock.blocks) {
+    if (1 + superblock.inode_blocks > superblock.blocks+1) {
         fprintf(stderr, "fs_format: Error metadata blocks amount (%u) exceeds disk capacity (%u)\n", 
                 1 + superblock.inode_blocks, superblock.blocks);
         return false;
@@ -140,19 +143,20 @@ bool fs_format(Disk *disk)
     for (int i = 0; i < BLOCK_SIZE; i++) {
         block_buffer.data[i] = 0;
     }
-
     block_buffer.super = superblock; // Copy the initialized superblock into the union
+    
 
     // attempt to write the metadata into the magic block
     if (disk_write(disk, 0, block_buffer.data) < 0) {
         perror("fs_format: Failed to write SuperBlock to disk");
         return false;
     }
+    
 
     memset(block_buffer.data, 0, BLOCK_SIZE);
 
-    // Clean the inode tables
-    for (uint32_t i = 1; i <= superblock.inode_blocks; i++) {
+    // Clean the inode table
+    for (uint32_t i = 1; i <= superblock.inode_blocks+1; i++) {
         if (disk_write(disk, i, block_buffer.data) < 0) {
             perror("fs_format: Failed to clear inode table blocks");
             return false;
@@ -204,17 +208,15 @@ bool fs_mount(FileSystem *fs, Disk *disk) {
     fs->disk = disk;
 
     uint32_t total_blocks = fs->meta_data->blocks;
-    fs->free_blocks = (bool *)calloc(total_blocks, sizeof(bool));
+    // bitmap
+    ssize_t bitmap_block = fs->meta_data->inode_blocks + 1; // Bitmap always sits right after the inode table
+    uint32_t bitmap_words = BLOCK_SIZE / sizeof(uint32_t);
+    uint32_t bitmap_bits = bitmap_words * BITS_PER_WORD;
+    uint32_t *bitmap = calloc(bitmap_words, sizeof(uint32_t));
+    fs->bitmap = &bitmap;
 
-    // Error check if free_blocks is invalid
-    if (fs->free_blocks == NULL) {
-        perror("fs_mount: Failed to allocate free block bitmap");
-        free(fs->meta_data);
-        return false;
-    }
+    set_bit(&bitmap, 0, 1); // Mark the superblock as allocated
 
-    // Set the super block (block 0) as allocated
-    fs->free_blocks[0] = true;
 
     // Mark Inode blocks (Blocks 1 To N) as allocated
     uint32_t inode_blocks_end = fs->meta_data->inode_blocks;
@@ -222,7 +224,7 @@ bool fs_mount(FileSystem *fs, Disk *disk) {
         // Check for bounds just in case
         if (i < total_blocks) { 
             // Mark as allocated
-            fs->free_blocks[i] = true;
+            set_bit(&bitmap, i, 1); 
         }
     }
 
@@ -234,7 +236,7 @@ bool fs_mount(FileSystem *fs, Disk *disk) {
         {
             perror("fs_mount: failed to read Inode table");
             free(fs->meta_data);
-            free(fs->free_blocks);
+            free(fs->bitmap);
             return false;
         }
         // Iterate through all the inodes inside the block
@@ -243,18 +245,18 @@ bool fs_mount(FileSystem *fs, Disk *disk) {
             // Check if inode is valid
             if (inode_buffer.inodes[j].valid == true )
                 {
-                for (uint32_t k = 0; k < POINTERS_PER_NODE; k++)
+                for (uint32_t k = 0; k < POINTERS_PER_INODE; k++)
                 {
                     uint32_t block_num = inode_buffer.inodes[j].direct[k];
                     // Check if pointer is non-zero AND within total disk bounds
-                    if (block_num != 0 && block_num < fs->meta_data->blocks) {
-                        fs->free_blocks[block_num] = true; // Mark as Allocated
+                    if (block_num != 0 && block_num < fs->meta_data->blocks) { 
+                        set_bit(&bitmap, block_num, 1); // Mark as Allocated
                     }
                 }
                 uint32_t indirect_block_num = inode_buffer.inodes[j].indirect;
                 uint32_t total_blocks = fs->meta_data->blocks;
                 if (indirect_block_num != 0 && indirect_block_num < total_blocks) {
-                    fs->free_blocks[indirect_block_num] = true;
+                    set_bit(&bitmap, indirect_block_num, 1);
 
                     Block indirect_buffer;
                     // Attempt to copy the indirect pointer into the indirect_buffer (basically the address)
@@ -262,7 +264,7 @@ bool fs_mount(FileSystem *fs, Disk *disk) {
                         // Handle the read error and CLEAN UP ALL allocated memory
                         perror("fs_mount: Failed to read indirect block during scan");
                         free(fs->meta_data);
-                        free(fs->free_blocks);
+                        free(fs->bitmap);
                         return false;
                     }
 
@@ -271,7 +273,7 @@ bool fs_mount(FileSystem *fs, Disk *disk) {
 
                             // Check if the pointer is non-zero AND within total disk bounds
                             if (data_block_num != 0 && data_block_num < total_blocks) {
-                                fs->free_blocks[data_block_num] = true; // Mark the data block as allocated
+                                set_bit(&bitmap, data_block_num, 1); // Mark the data block as allocated
                             }
                     }
                 }
@@ -305,9 +307,9 @@ void fs_unmount(FileSystem *fs) {
         free(fs->meta_data);
         fs->meta_data = NULL;
     }
-    if (fs->free_blocks != NULL) {
-        free(fs->free_blocks);
-        fs->free_blocks = NULL;
+    if (fs->bitmap != NULL) {
+        free(fs->bitmap);
+        fs->bitmap = NULL;
     }
 
     if (fs->disk != NULL) {
