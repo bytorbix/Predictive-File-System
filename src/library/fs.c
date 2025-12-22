@@ -166,7 +166,6 @@ bool fs_format(Disk *disk)
     return true;
 }
 
-
 bool fs_mount(FileSystem *fs, Disk *disk) {
     if (fs == NULL || disk == NULL) {
         perror("fs_mount: Error fs or disk is invalid (NULL)"); 
@@ -210,12 +209,17 @@ bool fs_mount(FileSystem *fs, Disk *disk) {
     uint32_t total_blocks = fs->meta_data->blocks;
     // bitmap
     ssize_t bitmap_block = fs->meta_data->inode_blocks + 1; // Bitmap always sits right after the inode table
-    uint32_t bitmap_words = BLOCK_SIZE / sizeof(uint32_t);
-    uint32_t bitmap_bits = bitmap_words * BITS_PER_WORD;
+    uint32_t bitmap_words = (total_blocks + BITS_PER_WORD -1)  / BITS_PER_WORD;
     uint32_t *bitmap = calloc(bitmap_words, sizeof(uint32_t));
-    fs->bitmap = &bitmap;
+    if (bitmap == NULL) {
+        perror("fs_mount: Failed to allocate memory for bitmap array");
+        free(bitmap);
+        free(fs->meta_data);
+        return false;
+    }
+    fs->bitmap = bitmap;
 
-    set_bit(&bitmap, 0, 1); // Mark the superblock as allocated
+    set_bit(bitmap, 0, 1); // Mark the superblock as allocated
 
 
     // Mark Inode blocks (Blocks 1 To N) as allocated
@@ -224,7 +228,7 @@ bool fs_mount(FileSystem *fs, Disk *disk) {
         // Check for bounds just in case
         if (i < total_blocks) { 
             // Mark as allocated
-            set_bit(&bitmap, i, 1); 
+            set_bit(bitmap, i, 1); 
         }
     }
 
@@ -250,13 +254,13 @@ bool fs_mount(FileSystem *fs, Disk *disk) {
                     uint32_t block_num = inode_buffer.inodes[j].direct[k];
                     // Check if pointer is non-zero AND within total disk bounds
                     if (block_num != 0 && block_num < fs->meta_data->blocks) { 
-                        set_bit(&bitmap, block_num, 1); // Mark as Allocated
+                        set_bit(bitmap, block_num, 1); // Mark as Allocated
                     }
                 }
                 uint32_t indirect_block_num = inode_buffer.inodes[j].indirect;
                 uint32_t total_blocks = fs->meta_data->blocks;
                 if (indirect_block_num != 0 && indirect_block_num < total_blocks) {
-                    set_bit(&bitmap, indirect_block_num, 1);
+                    set_bit(bitmap, indirect_block_num, 1);
 
                     Block indirect_buffer;
                     // Attempt to copy the indirect pointer into the indirect_buffer (basically the address)
@@ -273,7 +277,7 @@ bool fs_mount(FileSystem *fs, Disk *disk) {
 
                             // Check if the pointer is non-zero AND within total disk bounds
                             if (data_block_num != 0 && data_block_num < total_blocks) {
-                                set_bit(&bitmap, data_block_num, 1); // Mark the data block as allocated
+                                set_bit(bitmap, data_block_num, 1); // Mark the data block as allocated
                             }
                     }
                 }
@@ -285,7 +289,6 @@ bool fs_mount(FileSystem *fs, Disk *disk) {
     disk->mounted=true;
     return true;
 }
-
 
 void fs_unmount(FileSystem *fs) {
     // Error Checks
@@ -315,6 +318,98 @@ void fs_unmount(FileSystem *fs) {
     if (fs->disk != NULL) {
         disk_close(fs->disk);
     }
+}
+
+
+/**
+ * @brief Attempts to find and allocate a contiguous run of blocks using the First Fit algorithm.
+ *
+ * @param fs Pointer to the FileSystem structure.
+ * @param blocks_to_reserve The number of contiguous blocks requested.
+ * @return size_t* A pointer to an array of allocated block numbers (indices) on success.
+ * The array must be freed by the caller. Returns NULL on failure (disk full or fragmentation).
+ */
+size_t* fs_allocate(FileSystem *fs, size_t blocks_to_reserve) {
+    // Initial Validation Checks
+    if (fs == NULL || fs->meta_data == NULL || fs->bitmap == NULL || disk == NULL) { 
+        perror("fs_allocate: Error fs, metadata, bitmap, or disk is invalid (NULL)"); 
+        return NULL;
+    }
+
+    if (disk->mounted) { 
+        fprintf(stderr, "fs_allocate: Error disk is mounted, aborting to prevent data loss\n");
+        return NULL;
+    }
+
+    if (blocks_to_reserve == 0) {
+        return NULL; 
+    }
+
+    // init of the bitmap
+    uint32_t *bitmap = fs->bitmap;
+    uint32_t total_blocks = fs->meta_data->blocks;
+    size_t meta_blocks = 3 + (fs->meta_data->inode_blocks); 
+
+    // Declaring the allocation blocks array
+    size_t *allocated_array = calloc(blocks_to_reserve, sizeof(size_t)); 
+    if (allocated_array == NULL) {
+        perror("fs_allocate: Failed to allocate memory for return array");
+        return NULL; 
+    }
+    
+    // temp_count: a temporary count to achieve the a row of blocks in the amount desired
+    // start_block_index: we mark the first block index of the row that fits the desired blocks_to_reserve
+    size_t temp_count = 0;
+    size_t start_block_index = 0;
+
+    // Iteration of the whole blocks on the disk
+    for (size_t i = meta_blocks; i < total_blocks; i++)
+    {
+        // Checking if a block is not allocated (free)
+        if (!(get_bit(bitmap, i))) 
+        {
+            // Marking the first block index
+            if (temp_count == 0) {
+                start_block_index = i; 
+            }
+            temp_count++; 
+
+            // Row Found, Proceeding with allocation
+            if (temp_count == blocks_to_reserve) {
+                // Inner loop for saving the results on the allocation array
+                for (size_t j = 0; j < blocks_to_reserve; j++)
+                {
+                    // Marking the index block to iterate inside the row
+                    size_t block_index = start_block_index + j;
+                    
+                    // Attempt to allocate the block in the bitmap (set the bit to 1)
+                    if (!set_bit(bitmap, block_index, 1)) {
+                        // Allocation failed, Rolling back and cleaning the changes on the bitmap
+                        fprintf(stderr, "fs_allocate: Error setting bit for block %zu. Rolling back.\n", block_index);
+                        
+                        for (size_t k = 0; k < j; k++) {
+                            set_bit(bitmap, start_block_index + k, 0); 
+                        }
+
+                        free(allocated_array);
+                        return NULL;
+                    }
+                    allocated_array[j] = block_index;
+                }
+                // Returning the allocated array
+                return allocated_array;
+            }
+        }
+        // Block is allocated
+        else { 
+            temp_count = 0; // Reset the counter
+        }
+    }
+
+    // Failure, loop finished without finding enough space for the row
+    free(allocated_array);
+    fprintf(stderr, "fs_allocate: Not enough contiguous space available for %zu blocks (Fragmentation).\n", blocks_to_reserve);
+    return NULL;
 }
 
 ssize_t fs_create(FileSystem *fs) {

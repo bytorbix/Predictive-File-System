@@ -37,5 +37,19 @@ static inline void set_bit(uint32_t *bitmap, int block, int bit_to_set) {
             bitmap[word_index] &= ~mask; // Correctly clears the bit to 0
         }
     }
- 
+}
+
+static inline bool get_bit(uint32_t *bitmap, int block) 
+{
+    int word_index = block / BITS_PER_WORD;
+    int offset = block % BITS_PER_WORD;
+
+    if (offset < 0 || offset >= BITS_PER_WORD) {
+        return false;
+    }
+
+    uint32_t mask = 1U << offset;
+
+    return (bitmap[word_index] & mask) != 0;
+
 }
