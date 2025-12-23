@@ -54,6 +54,7 @@
     struct FileSystem {
         Disk *disk;             // Instance of the emulated Disk
         uint32_t *bitmap;      // Array of free blocks, (In-Memory Bitmap Cache)
+        uint32_t *ibitmap;     // Array of free blocks (In-Memory Inodes Bitmap Cache)
         SuperBlock *meta_data;  // Meta data of the file system
     };
 

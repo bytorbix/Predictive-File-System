@@ -206,34 +206,42 @@ bool fs_mount(FileSystem *fs, Disk *disk) {
     *(fs->meta_data) = superblock; // Copy the structure contents
     fs->disk = disk;
 
+    uint32_t total_inodes = fs->meta_data->inodes;
     uint32_t total_blocks = fs->meta_data->blocks;
-    // bitmap
+    // Data Bitmap
     ssize_t bitmap_block = fs->meta_data->inode_blocks + 1; // Bitmap always sits right after the inode table
     uint32_t bitmap_words = (total_blocks + BITS_PER_WORD -1)  / BITS_PER_WORD;
     uint32_t *bitmap = calloc(bitmap_words, sizeof(uint32_t));
     if (bitmap == NULL) {
         perror("fs_mount: Failed to allocate memory for bitmap array");
-        free(bitmap);
         free(fs->meta_data);
         return false;
     }
     fs->bitmap = bitmap;
 
-    set_bit(bitmap, 0, 1); // Mark the superblock as allocated
 
-
-    // Mark Inode blocks (Blocks 1 To N) as allocated
-    uint32_t inode_blocks_end = fs->meta_data->inode_blocks;
-    for (uint32_t i = 1; i <= inode_blocks_end; i++) {
-        // Check for bounds just in case
-        if (i < total_blocks) { 
-            // Mark as allocated
-            set_bit(bitmap, i, 1); 
-        }
+    // Inodes Bitmap
+    // ibitmap in it's initial form iterates through all the inodes and read if valid or not
+    uint32_t ibitmap_words = (total_inodes + BITS_PER_WORD - 1) / BITS_PER_WORD;
+    uint32_t *ibitmap = calloc(ibitmap_words, sizeof(uint32_t));
+    if (ibitmap == NULL) {
+        perror("fs_mount: Failed to allocate memory for ibitmap array");
+        free(fs->meta_data);
+        return false;
     }
+    fs->ibitmap = ibitmap;
 
+    set_bit(bitmap, 0, 1); // Mark the superblock as allocated
+    set_bit(bitmap, fs->meta_data->inode_blocks+1, 1);
+    
+    uint32_t inode_blocks_end = fs->meta_data->inode_blocks;
+    
     // Scanning The Inode Tables
     for (uint32_t i = 1; i <= inode_blocks_end; i++) {
+
+        // Mark Inode blocks (Blocks 1 To N) as allocated for bitmap
+        set_bit(bitmap, i, 1);
+
         Block inode_buffer;
         // Attempt to copy the inode data on the disk into inode_buffer
         if (disk_read(fs->disk, i, inode_buffer.data) < 0)
@@ -241,6 +249,7 @@ bool fs_mount(FileSystem *fs, Disk *disk) {
             perror("fs_mount: failed to read Inode table");
             free(fs->meta_data);
             free(fs->bitmap);
+            free(fs->ibitmap);
             return false;
         }
         // Iterate through all the inodes inside the block
@@ -249,6 +258,13 @@ bool fs_mount(FileSystem *fs, Disk *disk) {
             // Check if inode is valid
             if (inode_buffer.inodes[j].valid == true )
                 {
+                // Load Inodes validation to the ibitmap
+                uint32_t inode_idx = ((i-1) * INODES_PER_BLOCK) + j;
+                if (inode_idx >= total_inodes) break;
+                if (inode_buffer.inodes[j].valid == 1) {
+                    set_bit(ibitmap, inode_idx, 1);
+                }
+
                 for (uint32_t k = 0; k < POINTERS_PER_INODE; k++)
                 {
                     uint32_t block_num = inode_buffer.inodes[j].direct[k];
@@ -269,6 +285,7 @@ bool fs_mount(FileSystem *fs, Disk *disk) {
                         perror("fs_mount: Failed to read indirect block during scan");
                         free(fs->meta_data);
                         free(fs->bitmap);
+                        free(fs->ibitmap);
                         return false;
                     }
 
@@ -336,8 +353,8 @@ size_t* fs_allocate(FileSystem *fs, size_t blocks_to_reserve) {
         return NULL;
     }
 
-    if (disk->mounted) { 
-        fprintf(stderr, "fs_allocate: Error disk is mounted, aborting to prevent data loss\n");
+    if (!(disk->mounted()) { 
+        fprintf(stderr, "fs_allocate: Error disk is not mounted, cannot access the disk\n");
         return NULL;
     }
 
@@ -412,9 +429,10 @@ size_t* fs_allocate(FileSystem *fs, size_t blocks_to_reserve) {
     return NULL;
 }
 
+
 ssize_t fs_create(FileSystem *fs) {
     // Validation check
-     if (fs == NULL || fs->disk == NULL) {
+    if (fs == NULL || fs->disk == NULL) {
         perror("fs_create: Error fs or disk is invalid (NULL)"); 
         return -1;
     }
@@ -423,50 +441,38 @@ ssize_t fs_create(FileSystem *fs) {
         return -1;
     }
 
-    Block block_buffer;
+    int inode_num = -1;
+    uint32_t *ibitmap = fs->ibitmap;
+    uint32_t total_inodes = fs->meta_data->inodes;
 
-    for (uint32_t i = 1; i <= fs->meta_data->inode_blocks; i++)
+    for (size_t i = 0; i < total_inodes; i++)
     {
-        // Attempt to copy inode table into the block
-        if (disk_read(fs->disk, i, block_buffer.data) < 0) {
-            perror("fs_create: Failed to read Inode Block from disk");
-            return -1;
+        if (!(get_bit(ibitmap, i)) {
+            inode_num = i;
+            set_bit(ibitmap, i, 1);
+            break;
         }
-
-        // Iterate through the inodes in the inode table
-        for (uint32_t j = 0; j < INODES_PER_BLOCK; j++)
-        {
-            Inode *temp_inode = &block_buffer.inodes[j];
-            if (temp_inode->valid == 0) {
-                // Inode Found ! Formatting Inode and returing the location
-                temp_inode->valid = 1;
-                temp_inode->size = 0;
-
-                // Clear direct/Indirect blocks
-                for (uint32_t i = 0; i < 5; i++)
-                {
-                    temp_inode->direct[i] = 0;
-                }
-                temp_inode->indirect=0;
-
-                if (disk_write(fs->disk, i, block_buffer.data) < 0) {
-                    perror("fs_create: Failed to write updated Inode Block");
-                    // Undo allocation if write fails to maintain consistency
-                    temp_inode->valid = 0; 
-                    return -1;
-                }
-                
-
-                // Return The Inode location
-                ssize_t inode_number = (ssize_t)((i-1) * INODES_PER_BLOCK + j);
-                return inode_number;
-            }
-        }    
     }
 
-    //No free inode found after checking all blocks
-    fprintf(stderr, "fs_create: Error, inode table is full (max %u inodes)\n", fs->meta_data->inodes);
-    return -1;
+    if (inode_num == -1) return -1;
+
+    uint32_t block_idx = 1 + (inode_num / INODES_PER_BLOCK);
+    uint32_t offset = inode_num % INODES_PER_BLOCK;
+
+    Block block_buffer;
+    if (disk_read(fs->disk, block_idx, buffer.data) < 0) return -1;
+
+    Inode *target = &buffer.inodes[offset];
+    target->valid = 1;
+    target->size = 0;
+
+    // Zeroing Out pointers
+    for (size_t i = 0; i < 5; i++) target->direct[i] = 0;
+    target->indirect=0;
+
+
+    if (disk_write(fs->disk, block_idx, buffer.data) < 0) return -1;
+    return (ssize_t)inode_num;
 }
 
 ssize_t fs_write(FileSystem *fs, size_t inode_number, char *data, size_t length, size_t offset) 
@@ -486,48 +492,9 @@ ssize_t fs_write(FileSystem *fs, size_t inode_number, char *data, size_t length,
         return -1;
     }
 
-    // Locate and Read the Target Inode Block
-    uint32_t block_index = (uint32_t)(inode_number / INODES_PER_BLOCK) + 1;
-    uint32_t inode_offset = (uint32_t)(inode_number % INODES_PER_BLOCK);
+    
+    
 
-    // Copy the block containing the inode table
-    Block block_buffer;
-    if (disk_read(fs->disk, block_index, block_buffer.data) < 0) {
-        perror("fs_write: Failed to read Inode Block");
-        return -1;
-    }
-
-    Inode *target_inode = &block_buffer.inodes[inode_offset];
-    if (target_inode->valid == 0) {
-        fprintf(stderr, "fs_write: Error, Inode %zu is unallocated\n", inode_number);
-        return -1;
-    }
-
-    // Pointer to track position in the input data buffer
-    char* current_data_ptr = data;
-    // Total bytes remaining to write
-    size_t bytes_remaining = length;
-    // Current byte position within the file
-    size_t current_file_offset = offset;
-    // Total bytes successfully written
-    ssize_t bytes_written = 0;
-
-    while (bytes_remaining > 0) {
-
-        uint32_t logical_block_number = offset / BLOCK_SIZE;
-        uint32_t block_offset = current_file_offset % BLOCK_SIZE;
-        uint32_t space_in_block = BLOCK_SIZE - block_offset;
-        uint32_t write_size = (bytes_remaining < space_in_block) ? bytes_remaining : space_in_block;
-
-        if (logical_block_number < 5) 
-        {
-
-
-        }
-        else if(logical_block_number >= 5) {
-
-        }
-    }
 }
 
 bool fs_remove(FileSystem *fs, size_t inode_number) {return false;}
