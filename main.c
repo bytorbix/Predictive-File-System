@@ -35,19 +35,21 @@ int main() {
     disk_debug(disk);
     fs_debug(&fs);
 
-    size_t *result = fs_allocate(&fs, 5);
-    if (result == NULL) {
-        fprintf(stderr, "Failed to allocate 5 blocks\n");
-    } else {
-        printf("\nSuccessfully allocated 5 blocks:\n");
-        for (size_t i = 0; i < 5; i++) {
-            printf("Index [%zu]: Block Number %zu\n", i, result[i]);
-        }
-        free(result);
+    // Create a file and write some data to it
+    ssize_t inode = fs_create(&fs);
+    if (inode < 0) {
+        fprintf(stderr, "Failed to create file\n");
+        fs_unmount(&fs);
+        return 1;
     }
-    fs_bitmap_to_disk(&fs);
+    printf("\nCreated file (inode %zd)\n", inode);
 
+    char *msg = "Hello from MFS!";
+    ssize_t written = fs_write(&fs, inode, msg, strlen(msg), 0);
+    printf("Wrote %zd / %zu bytes\n", written, strlen(msg));
 
-    fs_unmount(&fs); 
+    fs_debug(&fs);
+
+    fs_unmount(&fs);
     return 0;
 }

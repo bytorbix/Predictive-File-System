@@ -645,6 +645,205 @@ ssize_t fs_write(FileSystem *fs, size_t inode_number, char *data, size_t length,
     return bytes_written;
 }
 
-bool fs_remove(FileSystem *fs, size_t inode_number) {return false;}
-ssize_t fs_stat(FileSystem *fs, size_t inode_number) {return -1;}
-ssize_t fs_read(FileSystem *fs, size_t inode_number, char *data, size_t length, size_t offset) {return -1;}
+ssize_t fs_read(FileSystem *fs, size_t inode_number, char *data, size_t length, size_t offset) 
+{
+    // Validation check
+     if (fs == NULL || fs->disk == NULL) {
+        perror("fs_read: Error fs or disk is invalid (NULL)"); 
+        return -1;
+    }
+    if (!fs->disk->mounted) { 
+        fprintf(stderr, "fs_read: Error disk is not mounted, cannot procceed t\n");
+        return -1;
+    }
+    if (inode_number >= fs->meta_data->inodes) {
+        // Inode number is invalid (too high)
+        fprintf(stderr, "fs_read: Error inode_number is out of bounds, cannot procceed t\n");
+        return -1;
+    }
+
+    // Figure out which logical blocks this read spans
+    size_t start_logical_block = offset / BLOCK_SIZE;
+    size_t start_block_offset = offset % BLOCK_SIZE;   // byte offset within the first block
+
+    // Locate the inode: block 0 is the superblock, so inode blocks start at 1
+    uint32_t inode_block_idx = 1 + (inode_number / INODES_PER_BLOCK);
+    uint32_t inode_offset_in_block = inode_number % INODES_PER_BLOCK;
+
+    // Read the block containing our inode and get a pointer to it
+    Block inode_buffer;
+    if (disk_read(fs->disk, inode_block_idx, inode_buffer.data) < 0)
+    {
+        fprintf(stderr, "fs_read: Error reading has failed.\n");
+        return -1;
+    }
+
+    Inode *target = &inode_buffer.inodes[inode_offset_in_block];
+
+    if (!target->valid) 
+    {
+        fprintf(stderr, "fs_read: Inode is invalid.\n");
+        return -1;
+    }
+
+    if (offset >= target->size) return 0;
+    if (offset + length > target->size) length = target->size - offset;
+
+
+    size_t end_byte = offset + length;                  // absolute end position in file
+    size_t end_logical_block = (end_byte > 0) ? ((end_byte-1) / BLOCK_SIZE) : 0;
+
+    size_t bytes_read = 0;
+
+    for (size_t i = start_logical_block; i <= end_logical_block; i++) 
+    {
+        size_t block_start = (i == start_logical_block) ? start_block_offset : 0;
+        size_t block_end = BLOCK_SIZE;
+        if (i == end_logical_block) {
+            block_end = end_byte % BLOCK_SIZE;
+            if (block_end == 0) block_end = BLOCK_SIZE;
+        }
+
+        if (i >= POINTERS_PER_INODE) {
+            // Indirect path
+            if (i - POINTERS_PER_INODE >= POINTERS_PER_BLOCK) {
+                fprintf(stderr, "fs_read: logical block exceeds maximum\n");
+                return -1;
+            }
+            if (target->indirect == 0) {
+                memset(data + bytes_read, 0, block_end - block_start);
+            } else {
+                Block pointers_block;
+                if (disk_read(fs->disk, target->indirect, pointers_block.data) < 0) {
+                    fprintf(stderr, "fs_read: Error reading indirect block has failed.\n");
+                    return -1;
+                }
+                size_t index = i - POINTERS_PER_INODE;
+                if (pointers_block.pointers[index] == 0) {
+                    memset(data + bytes_read, 0, block_end - block_start);
+                } else {
+                    Block buffer;
+                    if (disk_read(fs->disk, pointers_block.pointers[index], buffer.data) < 0) {
+                        fprintf(stderr, "fs_read: Error reading data block has failed.\n");
+                        return -1;
+                    }
+                    memcpy(data + bytes_read, buffer.data + block_start, block_end - block_start);
+                }
+            }
+        } else {
+            // Direct path
+            if (target->direct[i] == 0) {
+                memset(data + bytes_read, 0, block_end - block_start);
+            } 
+            else {
+                Block buffer;
+                if (disk_read(fs->disk, target->direct[i], buffer.data) < 0) {
+                    fprintf(stderr, "fs_read: Error reading data block has failed.\n");
+                    return -1;
+                }
+                memcpy(data + bytes_read, buffer.data + block_start, block_end - block_start);
+            }
+        }
+
+        bytes_read += (block_end - block_start);
+    }
+    return bytes_read;
+}
+
+
+bool fs_remove(FileSystem *fs, size_t inode_number) 
+{
+    // Validation check
+    if (fs == NULL || fs->disk == NULL) {
+        perror("fs_remove: Error fs or disk is invalid (NULL)"); 
+        return false;
+    }
+    if (!fs->disk->mounted) { 
+        fprintf(stderr, "fs_remove: Error disk is not mounted, cannot procceed t\n");
+        return false;
+    }
+
+    // Locate the inode
+    uint32_t inode_block_idx = 1 + (inode_number / INODES_PER_BLOCK);
+    uint32_t inode_offset_in_block = inode_number % INODES_PER_BLOCK;
+
+    // Read the block containing the inode
+    Block inode_buffer;
+    if (disk_read(fs->disk, inode_block_idx, inode_buffer.data) < 0) {
+        fprintf(stderr, "fs_remove: Error reading inode block has failed.\n");
+        return false;
+    }
+    Inode *target = &inode_buffer.inodes[inode_offset_in_block];
+
+    if (!target->valid) {
+        fprintf(stderr, "fs_remove: Inode is not valid.\n");
+        return false;
+    }
+
+    // Cleaning the inode
+    target->size = 0;
+    target->valid = 0;
+    for(size_t i = 0; i < POINTERS_PER_INODE; i++) 
+    {
+        if (target->direct[i] != 0) {
+            set_bit(fs->bitmap, target->direct[i], 0);
+            target->direct[i] = 0;
+        }
+    }
+    
+    if (target->indirect != 0) {
+        Block pointers_block;
+        if (disk_read(fs->disk, target->indirect, pointers_block.data) < 0) {
+            return false;
+        }
+        for (size_t i = 0; i < POINTERS_PER_BLOCK; i++) {
+            if (pointers_block.pointers[i] != 0) {
+                set_bit(fs->bitmap, pointers_block.pointers[i], 0);
+            }
+        }
+        set_bit(fs->bitmap, target->indirect, 0);
+        target->indirect = 0;
+    }
+
+    // Write the modified inode back to disk
+    if (disk_write(fs->disk, inode_block_idx, inode_buffer.data) < 0) {
+        return false;
+    }
+
+    // Mark inode as free in ibitmap
+    set_bit(fs->ibitmap, inode_number, 0);
+
+    // Persist the block bitmap (Temporary)
+    fs_bitmap_to_disk(fs);
+    return true;
+}
+ssize_t fs_stat(FileSystem *fs, size_t inode_number) 
+{
+    // Validation check
+    if (fs == NULL || fs->disk == NULL) {
+        perror("fs_stat: Error fs or disk is invalid (NULL)"); 
+        return -1;
+    }
+    if (!fs->disk->mounted) { 
+        fprintf(stderr, "fs_stat: Error disk is not mounted, cannot procceed t\n");
+        return -1;
+    }
+
+    // Locate the inode
+    uint32_t inode_block_idx = 1 + (inode_number / INODES_PER_BLOCK);
+    uint32_t inode_offset_in_block = inode_number % INODES_PER_BLOCK;
+
+    // Read the block containing the inode
+    Block inode_buffer;
+    if (disk_read(fs->disk, inode_block_idx, inode_buffer.data) < 0) {
+        fprintf(stderr, "fs_stat: Error reading inode block has failed.\n");
+        return -1;
+    }
+    Inode *target = &inode_buffer.inodes[inode_offset_in_block];
+
+    if (!target->valid) {
+        return -1;
+    } else {
+        return target->size;
+    }
+}
