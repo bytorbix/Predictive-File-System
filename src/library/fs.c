@@ -861,6 +861,35 @@ Inode* fs_read_inode(FileSystem *fs, size_t inode_number)
     return inode;
 }
 
+bool fs_write_inode(FileSystem *fs, Inode* inode, int inode_number) 
+{
+    if (fs == NULL || fs->disk == NULL) 
+    {
+        perror("fs_write_inode: Error fs or disk is invalid (NULL)"); 
+        return false;
+    }
+    if (inode_number > fs->meta_data->inodes) {
+        perror("fs_write_inode: Error inode_number exceeds the total inodes count"); 
+        return false;
+    }
+
+    Block buffer;
+    size_t block_idx = 1 + (inode_number / INODES_PER_BLOCK);
+    size_t offset = inode_number % INODES_PER_BLOCK;
+    if (disk_read(fs->disk, block_idx, buffer.data) < 0) 
+    {
+        perror("fs_write_inode: Error reading from disk has failed"); 
+        return false;
+    }
+
+    buffer.inodes[offset] = *inode;
+    if (disk_write(fs->disk, block_idx, buffer.data) < 0) {
+        perror("fs_write_inode: Error writing to disk has failed"); 
+        return false;
+    }
+    return true;
+}
+
 bool extent_add(FileSystem *fs, Inode *inode, uint32_t start, uint32_t length)
 {
     if (fs == NULL || fs->disk == NULL)

@@ -2,6 +2,8 @@
 
 #include <linux/types.h>
 
+
+
 // Extent declaration
 typedef struct Extent Extent;
 struct Extent {
@@ -9,7 +11,8 @@ struct Extent {
     uint32_t length; // Amount of contiguous allocated blocks 
 };
 
-#define EXTENTS_PER_BLOCK (BLOCK_SIZE / sizeof(Extent))
+#define PFS_BLOCK_SIZE (4096)
+#define EXTENTS_PER_BLOCK (PFS_BLOCK_SIZE / sizeof(Extent))
 #define EXTENTS_PER_INODE (3)
 
 

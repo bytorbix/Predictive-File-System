@@ -3,10 +3,13 @@
 #pragma once
 
 #include <linux/types.h>
+#include "inode.h"
+
 
 // File System Constants
 #define MAGIC_NUMBER (0xf0f03410)
-#define INODES_PER_BLOCK (BLOCK_SIZE / sizeof(Inode))
+#define INODES_PER_BLOCK (PFS_BLOCK_SIZE / sizeof(Inode))
+
 
 
 // File System Structure

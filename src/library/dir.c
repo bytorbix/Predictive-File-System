@@ -89,6 +89,12 @@ int dir_add(FileSystem *fs, size_t dir_inode, const char *name, size_t inode_num
         return -1;
     }
 
+
+    if (target->extent_count == 0 && target->extent_block == 0) {
+        perror("dir_add: Inode extents given is empty.");
+        return -1;
+    }
+
     // Scan existing entries for duplicates and find a free slot
     ssize_t available_slot = -1;
     for (size_t i = 0; i < target->size; i += 32)

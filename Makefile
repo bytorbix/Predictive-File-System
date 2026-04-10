@@ -12,6 +12,10 @@ all: $(TARGET) pfs_fuse
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $(TARGET) $(OBJS) $(LIBS)
 
+mkfs: mkfs.o $(LIB_OBJS)
+	$(CC) $(CFLAGS) -o mkfs mkfs.o $(LIB_OBJS) $(LIBS)
+
+
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
